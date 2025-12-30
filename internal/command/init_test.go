@@ -487,6 +487,73 @@ func TestInit_backend(t *testing.T) {
 	}
 }
 
+// regression test for https://github.com/hashicorp/terraform/issues/38027
+func TestInit_backend_migration_stateMgr_error(t *testing.T) {
+	// Create a temporary working directory that is empty
+	td := t.TempDir()
+	t.Chdir(td)
+
+	{
+		// create some state in (implied) local backend
+		outputCfg := `output "test" { value = "test" }
+`
+		if err := os.WriteFile("output.tf", []byte(outputCfg), 0644); err != nil {
+			t.Fatalf("err: %s", err)
+		}
+
+		ui := new(cli.MockUi)
+		applyView, done := testView(t)
+		applyCmd := &ApplyCommand{
+			Meta: Meta{
+				Ui:   ui,
+				View: applyView,
+			},
+		}
+		code := applyCmd.Run([]string{"-auto-approve"})
+		testOut := done(t)
+		if code != 0 {
+			t.Fatalf("bad: \n%s", testOut.All())
+		}
+
+		if _, err := os.Stat(DefaultStateFilename); err != nil {
+			t.Fatalf("err: %s", err)
+		}
+	}
+	{
+		// attempt to migrate the state to a broken backend
+		testBackend := new(httpBackend.TestHTTPBackend)
+		testBackend.SetMethodFunc("GET", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(403)
+		})
+		ts := httptest.NewServer(http.HandlerFunc(testBackend.Handle))
+		t.Cleanup(ts.Close)
+
+		backendCfg := fmt.Sprintf(`terraform {
+  backend "http" {
+    address = %q
+  }
+}
+`, ts.URL)
+		if err := os.WriteFile("backend.tf", []byte(backendCfg), 0644); err != nil {
+			t.Fatalf("err: %s", err)
+		}
+
+		ui := new(cli.MockUi)
+		initView, done := testView(t)
+		initCmd := &InitCommand{
+			Meta: Meta{
+				Ui:   ui,
+				View: initView,
+			},
+		}
+		if code := initCmd.Run([]string{"-migrate-state"}); code != 0 {
+			t.Fatalf("bad: \n%s", done(t).All())
+		}
+
+		t.Fatalf("test server state: %#v", testBackend)
+	}
+}
+
 func TestInit_backendUnset(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := t.TempDir()
